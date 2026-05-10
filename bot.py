@@ -279,6 +279,8 @@ async def main():
 
     scheduler.start()
 
+    await bot.delete_webhook(drop_pending_updates=True)
+
     await run_web_server()
 
     logger.info("Bot started, polling...")
@@ -287,4 +289,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
