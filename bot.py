@@ -84,15 +84,14 @@ async def handle_media(message: Message):
         return
 
     shift_hour, shift_date = get_current_shift()
-    if shift_hour is None:
-        return
+    if shift_hour is not None:
+        await add_submission(
+            chat_id, thread_id,
+            message.from_user.id,
+            message.from_user.username,
+            shift_hour, shift_date,
+        )
 
-    await add_submission(
-        chat_id, thread_id,
-        message.from_user.id,
-        message.from_user.username,
-        shift_hour, shift_date,
-    )
     await message.reply("+")
 
 
@@ -288,3 +287,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
