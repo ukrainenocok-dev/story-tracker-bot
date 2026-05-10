@@ -1,7 +1,9 @@
 ﻿import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone, date
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.filters import Command
@@ -243,6 +245,22 @@ async def send_report(shift_hour: int):
                 logger.error("Admin DM: %s", exc)
 
 
+# ── Web server (needed for Render Web Service) ───────────────────────────────
+
+async def run_web_server():
+    async def health(_request):
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("Web server listening on port %s", port)
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 async def main():
@@ -261,6 +279,9 @@ async def main():
     scheduler.add_job(send_report, "cron", hour=21, minute=0, args=[22])
 
     scheduler.start()
+
+    await run_web_server()
+
     logger.info("Bot started, polling...")
     await dp.start_polling(bot)
 

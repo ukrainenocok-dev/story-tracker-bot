@@ -2,3 +2,4 @@
 aiosqlite
 APScheduler==3.10.4
 python-dotenv
+aiohttp
