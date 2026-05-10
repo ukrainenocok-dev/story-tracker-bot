@@ -223,25 +223,22 @@ async def send_report(shift_hour: int):
         subs = await get_submissions(cid, tid, shift_hour, sd)
 
         if subs:
-            names = ", ".join(fmt_user(s) for s in subs)
-            text = f"📊 Звіт зміни {shift_hour}:00 ({sd})\n✅ Скинули: {names}"
-        else:
-            text = f"📊 Звіт зміни {shift_hour}:00 ({sd})\n❌ Ніхто не скинув сторіс!"
+            continue
 
+        text = f"❌ Зміна {shift_hour}:00 ({sd}) — ніхто не скинув сторіс!"
         try:
             kwargs = {"message_thread_id": tid} if tid else {}
-            await bot.send_message(cid, text, parse_mode="HTML", **kwargs)
+            await bot.send_message(cid, text, **kwargs)
         except Exception as exc:
             logger.error("Report chat=%s thread=%s: %s", cid, tid, exc)
 
-        if not subs:
-            try:
-                await bot.send_message(
-                    ADMIN_TELEGRAM_ID,
-                    f"🚨 [{chat['chat_name']}] Зміна {shift_hour}:00 ({sd}) — ніхто не скинув сторіс!",
-                )
-            except Exception as exc:
-                logger.error("Admin DM: %s", exc)
+        try:
+            await bot.send_message(
+                ADMIN_TELEGRAM_ID,
+                f"🚨 [{chat['chat_name']}] Зміна {shift_hour}:00 ({sd}) — ніхто не скинув сторіс!",
+            )
+        except Exception as exc:
+            logger.error("Admin DM: %s", exc)
 
 
 # ── Web server (needed for Render Web Service) ───────────────────────────────
@@ -289,5 +286,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
