@@ -108,6 +108,26 @@ async def handle_media(message: Message):
 
 # ── Admin commands ───────────────────────────────────────────────────────────
 
+@dp.message(Command("whereami"))
+async def cmd_whereami(message: Message):
+    if not is_admin(message):
+        return
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    chat_type = message.chat.type
+    chat_title = message.chat.title or "(особисті)"
+    await message.reply(
+        f"<b>Інфо про цей чат:</b>\n"
+        f"Назва: {chat_title}\n"
+        f"Тип: <code>{chat_type}</code>\n"
+        f"chat_id: <code>{chat_id}</code>\n"
+        f"thread_id: <code>{thread_id}</code>\n\n"
+        f"Команда для додавання:\n"
+        f"<code>/add_chat {chat_id} {thread_id} Назва</code>",
+        parse_mode="HTML",
+    )
+
+
 @dp.message(Command("add_story_chat"))
 async def cmd_add_story_chat(message: Message):
     if not is_admin(message):
