@@ -79,8 +79,11 @@ async def handle_media(message: Message):
     chat_id = message.chat.id
     thread_id = message.message_thread_id
 
+    logger.info("MEDIA received: chat_id=%s thread_id=%s user=%s", chat_id, thread_id, message.from_user.id)
+
     record = await find_monitored(chat_id, thread_id)
     if not record:
+        logger.info("MEDIA not monitored: chat_id=%s thread_id=%s", chat_id, thread_id)
         return
 
     shift_hour, shift_date = get_current_shift()
@@ -286,6 +289,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
