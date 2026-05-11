@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone, date
@@ -66,6 +66,10 @@ def fmt_user(row: dict) -> str:
     return f'<a href="tg://user?id={uid}">{uid}</a>'
 
 
+def is_admin(message: Message) -> bool:
+    return bool(message.from_user and message.from_user.id == ADMIN_TELEGRAM_ID)
+
+
 # ── Media handler ────────────────────────────────────────────────────────────
 
 @dp.message(
@@ -79,11 +83,9 @@ async def handle_media(message: Message):
     chat_id = message.chat.id
     thread_id = message.message_thread_id
 
-    logger.info("MEDIA received: chat_id=%s thread_id=%s user=%s", chat_id, thread_id, message.from_user.id)
-
     record = await find_monitored(chat_id, thread_id)
     if not record:
-        logger.info("MEDIA not monitored: chat_id=%s thread_id=%s", chat_id, thread_id)
+        logger.info("MEDIA ignored (not monitored): chat=%s thread=%s", chat_id, thread_id)
         return
 
     shift_hour, shift_date = get_current_shift()
@@ -94,15 +96,21 @@ async def handle_media(message: Message):
             message.from_user.username,
             shift_hour, shift_date,
         )
+        logger.info("MEDIA recorded: chat=%s thread=%s shift=%s", chat_id, thread_id, shift_hour)
+    else:
+        logger.info("MEDIA outside shift: chat=%s thread=%s", chat_id, thread_id)
 
-    await message.reply("+")
+    try:
+        await message.reply("+")
+    except Exception as exc:
+        logger.error("Reply '+' failed: %s", exc)
 
 
 # ── Admin commands ───────────────────────────────────────────────────────────
 
 @dp.message(Command("add_story_chat"))
 async def cmd_add_story_chat(message: Message):
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
+    if not is_admin(message):
         return
     if message.chat.type not in ("group", "supergroup"):
         await message.reply("Напишіть цю команду прямо в потрібній гілці групи.")
@@ -129,11 +137,14 @@ async def cmd_add_story_chat(message: Message):
 
 @dp.message(Command("add_chat"))
 async def cmd_add_chat(message: Message):
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
+    if not is_admin(message):
         return
     parts = message.text.split(maxsplit=3)
     if len(parts) < 4:
-        await message.reply("Використання: /add_chat chat_id thread_id Назва\nПриклад: /add_chat -1003725655321 71 Kitty Angel")
+        await message.reply(
+            "Використання: /add_chat chat_id thread_id Назва\n"
+            "Приклад: /add_chat -1003725655321 71 Kitty Angel"
+        )
         return
     try:
         chat_id = int(parts[1])
@@ -152,7 +163,7 @@ async def cmd_add_chat(message: Message):
 
 @dp.message(Command("list_story_chats"))
 async def cmd_list_story_chats(message: Message):
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
+    if not is_admin(message):
         return
 
     chats = await get_active_chats()
@@ -172,7 +183,7 @@ async def cmd_list_story_chats(message: Message):
 
 @dp.message(Command("remove_all_chats"))
 async def cmd_remove_all_chats(message: Message):
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
+    if not is_admin(message):
         return
     chats = await get_active_chats()
     if not chats:
@@ -185,11 +196,11 @@ async def cmd_remove_all_chats(message: Message):
 
 @dp.message(Command("remove_story_chat"))
 async def cmd_remove_story_chat(message: Message):
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
+    if not is_admin(message):
         return
 
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
+    if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
         await message.reply("Використання: /remove_story_chat <ID>")
         return
 
@@ -206,23 +217,38 @@ async def cmd_remove_story_chat(message: Message):
 
 @dp.message(Command("story_status"))
 async def cmd_story_status(message: Message):
-    if message.from_user.id != ADMIN_TELEGRAM_ID:
+    if not is_admin(message):
         return
 
     today = kyiv_now().date()
+    yesterday = today - timedelta(days=1)
     chats = await get_active_chats()
-    all_subs = await get_today_status(today)
+    today_subs = await get_today_status(today)
+    yesterday_subs = await get_today_status(yesterday)
 
     if not chats:
         await message.reply("Немає підключених гілок.")
         return
 
+    now_hour = kyiv_now().hour
+    # Shift 22 belongs to the date when 22:00 happened.
+    # Before 06:00 Kyiv we still want to see last night's shift 22 (yesterday's date).
+    shift22_date = yesterday if now_hour < 6 else today
+    shift22_subs = yesterday_subs if now_hour < 6 else today_subs
+
     lines = [f"<b>Статус сторіс за {today} (Київ)</b>"]
     for shift_hour in (6, 14, 22):
-        lines.append(f"\n<b>Зміна {shift_hour}:00</b>")
+        if shift_hour == 22:
+            subs_pool = shift22_subs
+            shift_date = shift22_date
+        else:
+            subs_pool = today_subs
+            shift_date = today
+
+        lines.append(f"\n<b>Зміна {shift_hour}:00</b> ({shift_date})")
         for c in chats:
             subs = [
-                s for s in all_subs
+                s for s in subs_pool
                 if s["chat_id"] == c["chat_id"]
                 and s["thread_id"] == c["thread_id"]
                 and s["shift_hour"] == shift_hour
@@ -301,6 +327,11 @@ async def run_web_server():
 async def main():
     await init_db()
 
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as exc:
+        logger.warning("delete_webhook failed: %s", exc)
+
     scheduler = AsyncIOScheduler(timezone="UTC")
 
     # Reminders  Kyiv 06:30 = UTC 03:30 | 14:30 = 11:30 | 22:30 = 19:30
@@ -315,8 +346,6 @@ async def main():
 
     scheduler.start()
 
-    await bot.delete_webhook(drop_pending_updates=True)
-
     await run_web_server()
 
     logger.info("Bot started, polling...")
@@ -325,9 +354,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
