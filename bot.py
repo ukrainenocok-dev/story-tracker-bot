@@ -127,6 +127,29 @@ async def cmd_add_story_chat(message: Message):
     await message.reply(f"✅ Додано «{chat_name}»{t}")
 
 
+@dp.message(Command("add_chat"))
+async def cmd_add_chat(message: Message):
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 4:
+        await message.reply("Використання: /add_chat chat_id thread_id Назва\nПриклад: /add_chat -1003725655321 71 Kitty Angel")
+        return
+    try:
+        chat_id = int(parts[1])
+        thread_id = int(parts[2])
+        chat_name = parts[3].strip()
+    except ValueError:
+        await message.reply("Помилка: chat_id і thread_id мають бути числами.")
+        return
+    existing = await find_monitored(chat_id, thread_id)
+    if existing:
+        await message.reply(f"Ця гілка вже підключена як «{existing['chat_name']}».")
+        return
+    await add_monitored_chat(chat_id, thread_id, chat_name)
+    await message.reply(f"✅ Додано «{chat_name}» (chat_id: {chat_id}, тред {thread_id})")
+
+
 @dp.message(Command("list_story_chats"))
 async def cmd_list_story_chats(message: Message):
     if message.from_user.id != ADMIN_TELEGRAM_ID:
@@ -289,6 +312,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
