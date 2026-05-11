@@ -170,6 +170,19 @@ async def cmd_list_story_chats(message: Message):
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
+@dp.message(Command("remove_all_chats"))
+async def cmd_remove_all_chats(message: Message):
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    chats = await get_active_chats()
+    if not chats:
+        await message.reply("Немає активних гілок.")
+        return
+    for c in chats:
+        await deactivate_chat(c["id"])
+    await message.reply(f"✅ Видалено всі гілки ({len(chats)} шт.)")
+
+
 @dp.message(Command("remove_story_chat"))
 async def cmd_remove_story_chat(message: Message):
     if message.from_user.id != ADMIN_TELEGRAM_ID:
@@ -312,6 +325,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
