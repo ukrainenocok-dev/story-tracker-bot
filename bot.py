@@ -9,7 +9,7 @@ from aiogram.types import Message
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_TELEGRAM_ID
+from config import BOT_TOKEN, ADMIN_TELEGRAM_ID, ADMIN_TELEGRAM_IDS
 from database import (
     init_db,
     add_monitored_chat,
@@ -67,7 +67,10 @@ def fmt_user(row: dict) -> str:
 
 
 def is_admin(message: Message) -> bool:
-    return bool(message.from_user and message.from_user.id == ADMIN_TELEGRAM_ID)
+    return bool(
+        message.from_user
+        and message.from_user.id in ADMIN_TELEGRAM_IDS
+    )
 
 
 # ── Media handler ────────────────────────────────────────────────────────────
@@ -317,13 +320,14 @@ async def send_report(shift_hour: int):
         except Exception as exc:
             logger.error("Report chat=%s thread=%s: %s", cid, tid, exc)
 
-        try:
-            await bot.send_message(
-                ADMIN_TELEGRAM_ID,
-                f"🚨 [{chat['chat_name']}] Зміна {shift_hour}:00 ({sd}) — ніхто не скинув сторіс!",
-            )
-        except Exception as exc:
-            logger.error("Admin DM: %s", exc)
+        for admin_id in ADMIN_TELEGRAM_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🚨 [{chat['chat_name']}] Зміна {shift_hour}:00 ({sd}) — ніхто не скинув сторіс!",
+                )
+            except Exception as exc:
+                logger.error("Admin DM to %s: %s", admin_id, exc)
 
 
 # ── Web server (needed for Render Web Service) ───────────────────────────────
