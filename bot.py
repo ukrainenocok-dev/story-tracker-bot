@@ -20,6 +20,7 @@ from database import (
     get_submissions,
     get_today_status,
 )
+from analyzer import analyze_photo, format_feedback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,23 @@ async def handle_media(message: Message):
         await message.reply("+")
     except Exception as exc:
         logger.error("Reply '+' failed: %s", exc)
+
+    # Аналіз фото через Gemini (тільки для photo, не video/document)
+    if message.photo:
+        try:
+            photo = message.photo[-1]  # найбільший розмір
+            file = await bot.get_file(photo.file_id)
+            buf = await bot.download_file(file.file_path)
+            image_bytes = buf.read() if hasattr(buf, "read") else bytes(buf)
+            analysis = await analyze_photo(image_bytes)
+            feedback = format_feedback(analysis)
+            if feedback:
+                try:
+                    await message.reply(feedback)
+                except Exception as exc:
+                    logger.error("Reply feedback failed: %s", exc)
+        except Exception as exc:
+            logger.error("Photo analysis pipeline failed: %s", exc)
 
 
 # ── Admin commands ───────────────────────────────────────────────────────────
