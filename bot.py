@@ -3,6 +3,10 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone, date
 
+RATING_CHAT_ID = int(os.getenv("RATING_CHAT_ID", "0"))
+_rating_thread_raw = os.getenv("RATING_THREAD_ID", "").strip()
+RATING_THREAD_ID = int(_rating_thread_raw) if _rating_thread_raw.lstrip("-").isdigit() else None
+
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
@@ -21,6 +25,7 @@ from database import (
     get_today_status,
 )
 from analyzer import analyze_photo, format_feedback
+from sheets import get_balances_for_day, format_rating
 
 logging.basicConfig(
     level=logging.INFO,
@@ -303,6 +308,53 @@ async def cmd_story_status(message: Message):
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
+# ── Daily rating ─────────────────────────────────────────────────────────────
+
+async def send_daily_rating():
+    """Pulls yesterday's balances from the Google Sheet and posts a rating."""
+    yesterday = (kyiv_now() - timedelta(days=1)).date()
+    entries = await get_balances_for_day(yesterday.day)
+    if entries is None:
+        logger.error("Daily rating: sheet fetch failed")
+        return
+    text = format_rating(entries, yesterday)
+
+    if not RATING_CHAT_ID:
+        logger.warning("RATING_CHAT_ID not set, falling back to admins DM")
+        for admin_id in ADMIN_TELEGRAM_IDS:
+            try:
+                await bot.send_message(admin_id, text, parse_mode="HTML")
+            except Exception as exc:
+                logger.error("Rating DM to %s: %s", admin_id, exc)
+        return
+
+    kwargs = {"message_thread_id": RATING_THREAD_ID} if RATING_THREAD_ID else {}
+    try:
+        await bot.send_message(RATING_CHAT_ID, text, parse_mode="HTML", **kwargs)
+    except Exception as exc:
+        logger.error("Rating post failed (chat=%s, thread=%s): %s",
+                     RATING_CHAT_ID, RATING_THREAD_ID, exc)
+
+
+@dp.message(Command("rating"))
+async def cmd_rating(message: Message):
+    if not is_admin(message):
+        return
+    # Опціонально приймаємо номер дня: /rating 18  (інакше — вчора).
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) >= 2 and parts[1].strip().isdigit():
+        day = int(parts[1].strip())
+        target_date = kyiv_now().date().replace(day=day) if 1 <= day <= 31 else (kyiv_now() - timedelta(days=1)).date()
+    else:
+        target_date = (kyiv_now() - timedelta(days=1)).date()
+
+    entries = await get_balances_for_day(target_date.day)
+    if entries is None:
+        await message.reply("Не вдалося прочитати таблицю. Перевір SALARY_SHEET_ID і доступ.")
+        return
+    await message.reply(format_rating(entries, target_date), parse_mode="HTML")
+
+
 # ── Scheduler jobs ───────────────────────────────────────────────────────────
 
 async def send_reminder(shift_hour: int):
@@ -380,6 +432,9 @@ async def main():
     scheduler.add_job(send_reminder, "cron", hour=3,  minute=30, args=[6])
     scheduler.add_job(send_reminder, "cron", hour=11, minute=30, args=[14])
     scheduler.add_job(send_reminder, "cron", hour=19, minute=30, args=[22])
+
+    # Daily rating Kyiv 18:00 = UTC 15:00
+    scheduler.add_job(send_daily_rating, "cron", hour=15, minute=0)
 
     # Reports    Kyiv 08:00 = UTC 05:00 | 16:00 = 13:00 | 00:00 = 21:00
     scheduler.add_job(send_report, "cron", hour=5,  minute=0, args=[6])
