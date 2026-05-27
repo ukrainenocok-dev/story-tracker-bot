@@ -103,9 +103,9 @@ def _truncate(text: str, font, max_width: int) -> str:
 
 
 def _draw_header(img: Image.Image, for_date: date):
-    # верхній лейбл "DEAL MAKERS"
+    # верхній лейбл "NEXT MODELS"
     brand_font = _font(20, bold=True)
-    brand = "DEAL  MAKERS"
+    brand = "NEXT  MODELS"
     bw = ImageDraw.Draw(img).textlength(brand, font=brand_font)
     _neon_text(
         img, ((WIDTH - bw) / 2, 20), brand, brand_font, NEON_TEAL,
@@ -141,9 +141,9 @@ def _draw_podium(img: Image.Image, top3: list[tuple[str, str, float]]):
 
     # порядок: 2-й | 1-й | 3-й
     layout = []
-    layout.append((2, top3[1], SILVER, 170) if len(top3) >= 2 else None)
-    layout.append((1, top3[0], GOLD, 220))
-    layout.append((3, top3[2], BRONZE, 140) if len(top3) >= 3 else None)
+    layout.append((2, top3[1], SILVER, 180) if len(top3) >= 2 else None)
+    layout.append((1, top3[0], GOLD, 230))
+    layout.append((3, top3[2], BRONZE, 155) if len(top3) >= 3 else None)
 
     box_w = 280
     gap = 28
@@ -167,23 +167,23 @@ def _draw_podium(img: Image.Image, top3: list[tuple[str, str, float]]):
         )
 
         # цифра ранку — велика, з неоновим світінням
-        rank_font = _font(80, bold=True)
+        rank_font = _font(64, bold=True)
         rank_str = str(rank)
         rw = ImageDraw.Draw(img).textlength(rank_str, font=rank_font)
         _neon_text(
-            img, (x + (box_w - rw) / 2, y_top + 14), rank_str, rank_font, color,
+            img, (x + (box_w - rw) / 2, y_top + 12), rank_str, rank_font, color,
             glow_radius=14, glow_alpha=200,
         )
 
         # лейбл: FirstName (id) — з неоновим teal-світінням
         label = format_label(name, chatter_id)
-        label_font = _font(28, bold=True)
+        label_font = _font(36, bold=True)
         label_short = _truncate(label, label_font, box_w - 24)
         lw = ImageDraw.Draw(img).textlength(label_short, font=label_font)
         _neon_text(
-            img, (x + (box_w - lw) / 2, y_top + h - 50),
+            img, (x + (box_w - lw) / 2, y_top + h - 60),
             label_short, label_font, NEON_TEAL,
-            glow_radius=8, glow_alpha=160,
+            glow_radius=10, glow_alpha=180,
         )
 
 
