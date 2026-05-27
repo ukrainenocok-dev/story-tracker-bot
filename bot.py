@@ -26,6 +26,8 @@ from database import (
 )
 from analyzer import analyze_photo, format_feedback
 from sheets import get_balances_for_day, format_rating
+from image_renderer import render_rating_image
+from aiogram.types import BufferedInputFile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -310,6 +312,29 @@ async def cmd_story_status(message: Message):
 
 # ── Daily rating ─────────────────────────────────────────────────────────────
 
+async def _post_rating(target_chat: int, thread_id: int | None,
+                       entries: list, for_date: date):
+    """Render image + send. Falls back to text on render failure."""
+    caption = f"🏆 Рейтинг чатерів за {for_date.strftime('%d.%m.%Y')}"
+    kwargs = {"message_thread_id": thread_id} if thread_id else {}
+
+    png = render_rating_image(entries, for_date)
+    if png:
+        photo = BufferedInputFile(png, filename=f"rating_{for_date}.png")
+        try:
+            await bot.send_photo(target_chat, photo, caption=caption, **kwargs)
+            return
+        except Exception as exc:
+            logger.error("Rating photo failed for %s: %s — fallback to text", target_chat, exc)
+
+    # Fallback: текст
+    try:
+        await bot.send_message(target_chat, format_rating(entries, for_date),
+                               parse_mode="HTML", **kwargs)
+    except Exception as exc:
+        logger.error("Rating text send failed for %s: %s", target_chat, exc)
+
+
 async def send_daily_rating():
     """Pulls yesterday's balances from the Google Sheet and posts a rating."""
     yesterday = (kyiv_now() - timedelta(days=1)).date()
@@ -317,23 +342,14 @@ async def send_daily_rating():
     if entries is None:
         logger.error("Daily rating: sheet fetch failed")
         return
-    text = format_rating(entries, yesterday)
 
     if not RATING_CHAT_ID:
         logger.warning("RATING_CHAT_ID not set, falling back to admins DM")
         for admin_id in ADMIN_TELEGRAM_IDS:
-            try:
-                await bot.send_message(admin_id, text, parse_mode="HTML")
-            except Exception as exc:
-                logger.error("Rating DM to %s: %s", admin_id, exc)
+            await _post_rating(admin_id, None, entries, yesterday)
         return
 
-    kwargs = {"message_thread_id": RATING_THREAD_ID} if RATING_THREAD_ID else {}
-    try:
-        await bot.send_message(RATING_CHAT_ID, text, parse_mode="HTML", **kwargs)
-    except Exception as exc:
-        logger.error("Rating post failed (chat=%s, thread=%s): %s",
-                     RATING_CHAT_ID, RATING_THREAD_ID, exc)
+    await _post_rating(RATING_CHAT_ID, RATING_THREAD_ID, entries, yesterday)
 
 
 @dp.message(Command("rating"))
@@ -352,7 +368,7 @@ async def cmd_rating(message: Message):
     if entries is None:
         await message.reply("Не вдалося прочитати таблицю. Перевір SALARY_SHEET_ID і доступ.")
         return
-    await message.reply(format_rating(entries, target_date), parse_mode="HTML")
+    await _post_rating(message.chat.id, message.message_thread_id, entries, target_date)
 
 
 # ── Scheduler jobs ───────────────────────────────────────────────────────────
