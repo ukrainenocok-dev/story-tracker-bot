@@ -1,7 +1,13 @@
 """Google Sheets reader for the daily chatter rating.
 
-Fetches a public sheet (CSV export) and returns chatter balances for a given day.
-Expected layout (based on 'Зарплата Deal Makers'):
+Supports multiple sheets (Deal Makers + Cash Kings).
+Fetches each public sheet (CSV export) and merges balances by chatter name.
+
+Env vars:
+  SALARY_SHEET_ID / SALARY_SHEET_GID     — Deal Makers (legacy names kept)
+  CASH_KINGS_SHEET_ID / CASH_KINGS_SHEET_GID — Cash Kings
+
+Layout for each sheet (based on 'Зарплата Deal Makers'):
   Row 4 has headers: Имя | Копейки | 1 | 2 | ... | 31 | Total ...
   Data rows start at row 5.
   Day columns are labelled with the day number ('1', '2', ..., '31').
@@ -11,6 +17,7 @@ We skip:
   * Service rows ('Рассылки', 'Подписка', ...)
 """
 
+import asyncio
 import csv
 import io
 import logging
@@ -22,8 +29,13 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-SHEET_ID = os.getenv("SALARY_SHEET_ID", "")
-SHEET_GID = os.getenv("SALARY_SHEET_GID", "0")
+# Backward compat: SALARY_SHEET_ID = Deal Makers
+DEAL_MAKERS_SHEET_ID = os.getenv("SALARY_SHEET_ID", "") or os.getenv("DEAL_MAKERS_SHEET_ID", "")
+DEAL_MAKERS_SHEET_GID = os.getenv("SALARY_SHEET_GID", "0") or os.getenv("DEAL_MAKERS_SHEET_GID", "0")
+
+CASH_KINGS_SHEET_ID = os.getenv("CASH_KINGS_SHEET_ID", "")
+CASH_KINGS_SHEET_GID = os.getenv("CASH_KINGS_SHEET_GID", "0")
+
 SHEET_TIMEOUT = float(os.getenv("SHEETS_TIMEOUT", "15"))
 
 # Service / non-chatter rows that must be excluded from the rating.
@@ -34,30 +46,30 @@ _SKIP_NAMES = {
 }
 
 
-def _csv_url() -> Optional[str]:
-    if not SHEET_ID:
+def _csv_url(sheet_id: str, sheet_gid: str) -> Optional[str]:
+    if not sheet_id:
         return None
     return (
-        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
-        f"/export?format=csv&gid={SHEET_GID}"
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        f"/export?format=csv&gid={sheet_gid}"
     )
 
 
-async def _fetch_csv() -> Optional[str]:
-    url = _csv_url()
+async def _fetch_csv(sheet_id: str, sheet_gid: str, label: str = "") -> Optional[str]:
+    url = _csv_url(sheet_id, sheet_gid)
     if not url:
-        logger.warning("SALARY_SHEET_ID is not configured")
+        logger.warning("Sheet ID not configured for %s", label or "sheet")
         return None
     timeout = aiohttp.ClientTimeout(total=SHEET_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, allow_redirects=True) as resp:
                 if resp.status != 200:
-                    logger.error("Sheets fetch HTTP %s", resp.status)
+                    logger.error("Sheets fetch HTTP %s for %s", resp.status, label)
                     return None
                 return await resp.text()
     except Exception as exc:
-        logger.error("Sheets fetch failed: %s", exc)
+        logger.error("Sheets fetch failed for %s: %s", label, exc)
         return None
 
 
@@ -147,11 +159,62 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
     return results
 
 
-async def get_balances_for_day(day: int) -> Optional[list[tuple[str, float]]]:
-    csv_text = await _fetch_csv()
+async def _get_one_sheet(sheet_id: str, sheet_gid: str, day: int, label: str) -> list[tuple[str, float]]:
+    """Fetch + parse a single sheet. Returns [] if missing/failed."""
+    if not sheet_id:
+        return []
+    csv_text = await _fetch_csv(sheet_id, sheet_gid, label)
     if csv_text is None:
-        return None
+        return []
     return parse_balances_for_day(csv_text, day)
+
+
+def _merge_entries(*sources: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Merge entries by normalized name, summing amounts.
+
+    Display name = the first variant seen (preserves original casing/spelling).
+    """
+    totals: dict[str, float] = {}
+    display: dict[str, str] = {}
+    for src in sources:
+        for name, amount in src:
+            key = _normalize_name(name)
+            if key not in display:
+                display[key] = name
+            totals[key] = totals.get(key, 0.0) + amount
+
+    merged = [(display[k], totals[k]) for k in totals if totals[k] > 0]
+    merged.sort(key=lambda x: x[1], reverse=True)
+    return merged
+
+
+async def get_balances_for_day(day: int) -> Optional[list[tuple[str, float]]]:
+    """Return combined rating for the given day from all configured sheets.
+
+    Returns None only if *no* sheet is configured.
+    """
+    have_dm = bool(DEAL_MAKERS_SHEET_ID)
+    have_ck = bool(CASH_KINGS_SHEET_ID)
+
+    if not have_dm and not have_ck:
+        logger.warning("No sheets configured (SALARY_SHEET_ID / CASH_KINGS_SHEET_ID)")
+        return None
+
+    tasks = []
+    if have_dm:
+        tasks.append(_get_one_sheet(DEAL_MAKERS_SHEET_ID, DEAL_MAKERS_SHEET_GID, day, "Deal Makers"))
+    if have_ck:
+        tasks.append(_get_one_sheet(CASH_KINGS_SHEET_ID, CASH_KINGS_SHEET_GID, day, "Cash Kings"))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    cleaned: list[list[tuple[str, float]]] = []
+    for r in results:
+        if isinstance(r, Exception):
+            logger.error("Sheet fetch raised: %s", r)
+            continue
+        cleaned.append(r)
+
+    return _merge_entries(*cleaned)
 
 
 def format_rating(entries: list[tuple[str, float]], for_date: date) -> str:
