@@ -12,6 +12,8 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from sheets import format_label
+
 logger = logging.getLogger(__name__)
 
 WIDTH, HEIGHT = 1280, 720
@@ -133,26 +135,27 @@ def _draw_header(img: Image.Image, for_date: date):
     ImageDraw.Draw(img).text(((WIDTH - dw) / 2, 145), date_str, font=df, fill=TEXT_SECONDARY)
 
 
-def _draw_podium(img: Image.Image, top3: list[tuple[str, float]]):
+def _draw_podium(img: Image.Image, top3: list[tuple[str, str, float]]):
     if not top3:
         return
 
     # порядок: 2-й | 1-й | 3-й
     layout = []
-    layout.append((2, top3[1], SILVER, 160) if len(top3) >= 2 else None)
-    layout.append((1, top3[0], GOLD, 210))
-    layout.append((3, top3[2], BRONZE, 130) if len(top3) >= 3 else None)
+    layout.append((2, top3[1], SILVER, 170) if len(top3) >= 2 else None)
+    layout.append((1, top3[0], GOLD, 220))
+    layout.append((3, top3[2], BRONZE, 140) if len(top3) >= 3 else None)
 
     box_w = 280
     gap = 28
     total_w = box_w * 3 + gap * 2
     start_x = (WIDTH - total_w) // 2
-    base_y = 430
+    base_y = 440
 
     for i, item in enumerate(layout):
         if item is None:
             continue
-        rank, (name, amount), color, h = item
+        rank, entry, color, h = item
+        name, chatter_id, _amount = entry
         x = start_x + i * (box_w + gap)
         y_top = base_y - h
 
@@ -164,53 +167,46 @@ def _draw_podium(img: Image.Image, top3: list[tuple[str, float]]):
         )
 
         # цифра ранку — велика, з неоновим світінням
-        rank_font = _font(72, bold=True)
+        rank_font = _font(80, bold=True)
         rank_str = str(rank)
         rw = ImageDraw.Draw(img).textlength(rank_str, font=rank_font)
         _neon_text(
-            img, (x + (box_w - rw) / 2, y_top + 12), rank_str, rank_font, color,
+            img, (x + (box_w - rw) / 2, y_top + 14), rank_str, rank_font, color,
             glow_radius=14, glow_alpha=200,
         )
 
-        # ім'я
-        name_font = _font(20, bold=True)
-        name_short = _truncate(name, name_font, box_w - 30)
-        nw = ImageDraw.Draw(img).textlength(name_short, font=name_font)
-        ImageDraw.Draw(img).text(
-            (x + (box_w - nw) / 2, y_top + 100),
-            name_short, font=name_font, fill=TEXT_PRIMARY,
-        )
-
-        # сума з неоновим teal-світінням
-        amount_str = f"{amount:,.2f}".replace(",", " ")
-        amt_font = _font(30, bold=True)
-        aw = ImageDraw.Draw(img).textlength(amount_str, font=amt_font)
+        # лейбл: FirstName (id) — з неоновим teal-світінням
+        label = format_label(name, chatter_id)
+        label_font = _font(28, bold=True)
+        label_short = _truncate(label, label_font, box_w - 24)
+        lw = ImageDraw.Draw(img).textlength(label_short, font=label_font)
         _neon_text(
-            img, (x + (box_w - aw) / 2, y_top + 130),
-            amount_str, amt_font, NEON_TEAL,
+            img, (x + (box_w - lw) / 2, y_top + h - 50),
+            label_short, label_font, NEON_TEAL,
             glow_radius=8, glow_alpha=160,
         )
 
 
-def _draw_rest_list(img: Image.Image, rest: list[tuple[str, float]]):
+def _draw_rest_list(img: Image.Image, rest: list[tuple[str, str, float]]):
     if not rest:
         return
 
-    list_top = 470
-    col_w = 540
-    gap = 50
+    list_top = 480
+    col_w = 480
+    gap = 60
     start_x = (WIDTH - (col_w * 2 + gap)) // 2
 
-    item_font = _font(17)
-    amt_font = _font(18, bold=True)
-    line_h = 26
+    item_font = _font(19, bold=True)
+    rank_font = _font(18, bold=True)
+    line_h = 30
 
-    avail_h = HEIGHT - list_top - 25
+    avail_h = HEIGHT - list_top - 30
     max_per_col = max(1, avail_h // line_h)
     visible = rest[: max_per_col * 2]
 
     draw = ImageDraw.Draw(img)
-    for i, (name, amount) in enumerate(visible):
+    for i, entry in enumerate(visible):
+        name, chatter_id, _amount = entry
         rank = i + 4
         col = i // max_per_col
         row = i % max_per_col
@@ -218,15 +214,11 @@ def _draw_rest_list(img: Image.Image, rest: list[tuple[str, float]]):
         y = list_top + row * line_h
 
         rank_str = f"{rank:02d}"
-        rank_w = draw.textlength(rank_str, font=item_font)
-        draw.text((x, y), rank_str, font=item_font, fill=NEON_MAGENTA)
+        draw.text((x, y), rank_str, font=rank_font, fill=NEON_MAGENTA)
 
-        name_short = _truncate(name, item_font, col_w - rank_w - 110)
-        draw.text((x + 40, y), name_short, font=item_font, fill=TEXT_PRIMARY)
-
-        amount_str = f"{amount:,.2f}".replace(",", " ")
-        aw = draw.textlength(amount_str, font=amt_font)
-        draw.text((x + col_w - aw, y - 1), amount_str, font=amt_font, fill=NEON_TEAL)
+        label = format_label(name, chatter_id)
+        label_short = _truncate(label, item_font, col_w - 50)
+        draw.text((x + 44, y - 1), label_short, font=item_font, fill=TEXT_PRIMARY)
 
     remaining = len(rest) - len(visible)
     if remaining > 0:
@@ -248,7 +240,7 @@ def _vignette(img: Image.Image):
     img.paste(black, (0, 0), Image.eval(overlay, lambda v: 255 - v))
 
 
-def render_rating_image(entries: list[tuple[str, float]], for_date: date) -> Optional[bytes]:
+def render_rating_image(entries: list[tuple[str, str, float]], for_date: date) -> Optional[bytes]:
     try:
         img = _bg().convert("RGBA")
         _draw_scanlines(img)

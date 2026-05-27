@@ -3,18 +3,19 @@
 Supports multiple sheets (Deal Makers + Cash Kings).
 Fetches each public sheet (CSV export) and merges balances by chatter name.
 
+Each chatter now has an ID (taken from column B in the sheet) which is used
+in the displayed label instead of the surname.
+
 Env vars:
-  SALARY_SHEET_ID / SALARY_SHEET_GID     — Deal Makers (legacy names kept)
+  SALARY_SHEET_ID / SALARY_SHEET_GID         — Deal Makers (legacy names kept)
   CASH_KINGS_SHEET_ID / CASH_KINGS_SHEET_GID — Cash Kings
 
-Layout for each sheet (based on 'Зарплата Deal Makers'):
-  Row 4 has headers: Имя | Копейки | 1 | 2 | ... | 31 | Total ...
+Layout for each sheet:
+  Row 4 has headers: Имя | <ID> | 1 | 2 | ... | 31 | Total ...
   Data rows start at row 5.
-  Day columns are labelled with the day number ('1', '2', ..., '31').
+  Column A = name, column B = chatter ID, columns C+ = days.
 
-We skip:
-  * Rows with empty name
-  * Service rows ('Рассылки', 'Подписка', ...)
+Entry type: tuple[str, str, float] = (full_name, chatter_id, amount).
 """
 
 import asyncio
@@ -29,7 +30,6 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Backward compat: SALARY_SHEET_ID = Deal Makers
 DEAL_MAKERS_SHEET_ID = os.getenv("SALARY_SHEET_ID", "") or os.getenv("DEAL_MAKERS_SHEET_ID", "")
 DEAL_MAKERS_SHEET_GID = os.getenv("SALARY_SHEET_GID", "0") or os.getenv("DEAL_MAKERS_SHEET_GID", "0")
 
@@ -44,6 +44,9 @@ _SKIP_NAMES = {
     "подписка", "підписка",
     "имя", "імʼя", "ім'я", "имя ",
 }
+
+# Column B (zero-based index 1) — chatter identifier.
+ID_COL_INDEX = 1
 
 
 def _csv_url(sheet_id: str, sheet_gid: str) -> Optional[str]:
@@ -78,7 +81,7 @@ def _normalize_name(s: str) -> str:
 
 
 def _parse_amount(s: str) -> float:
-    """Parse a sheet cell like '264.26' or '264,26' or '1 200,50' into float."""
+    """Parse '264.26' / '264,26' / '1 200,50' / '' into float."""
     if not s:
         return 0.0
     s = s.replace("\xa0", "").replace(" ", "").replace(",", ".").strip()
@@ -90,8 +93,35 @@ def _parse_amount(s: str) -> float:
         return 0.0
 
 
-def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
-    """Return list of (chatter_name, amount) for the requested day-of-month.
+def _format_id(raw: str) -> str:
+    """Normalize the chatter ID from column B."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # '5.0' → '5', '12.00' → '12'
+    try:
+        f = float(s.replace(",", "."))
+        if f == int(f):
+            return str(int(f))
+        # decimal ID → keep as-is, but normalized
+        return f"{f:g}"
+    except ValueError:
+        return s
+
+
+def _first_name(full_name: str) -> str:
+    parts = (full_name or "").strip().split()
+    return parts[0] if parts else (full_name or "")
+
+
+def format_label(full_name: str, chatter_id: str) -> str:
+    """Public helper used by renderer + text formatter."""
+    fn = _first_name(full_name)
+    return f"{fn} ({chatter_id})" if chatter_id else fn
+
+
+def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, str, float]]:
+    """Return list of (full_name, chatter_id, amount) for the requested day.
 
     Sorted descending by amount. Zero / empty are filtered out.
     """
@@ -100,7 +130,6 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
     if not rows:
         return []
 
-    # Знаходимо рядок із заголовками — той, де є колонка "Имя" / "Ім'я".
     header_idx = -1
     for i, row in enumerate(rows[:10]):
         normalized = [_normalize_name(c) for c in row]
@@ -112,7 +141,6 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
         return []
 
     headers = rows[header_idx]
-    # Шукаємо колонку дня — підпис буває '1', '01', ' 1 ', '1.0' тощо.
     day_col = -1
     target_variants = {str(day), str(day).zfill(2), f"{day}.0"}
     for col_idx, h in enumerate(headers):
@@ -121,7 +149,6 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
             day_col = col_idx
             break
     if day_col < 0:
-        # запасний пошук — точна збіжність як int
         for col_idx, h in enumerate(headers):
             try:
                 if int(float((h or "").strip())) == day:
@@ -133,7 +160,6 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
         logger.warning("Column for day=%s not found", day)
         return []
 
-    # Колонка з імʼям — зазвичай перша, але знайдемо по заголовку.
     name_col = -1
     for col_idx, h in enumerate(headers):
         if _normalize_name(h) in {"имя", "ім'я", "імʼя", "ім´я"}:
@@ -142,7 +168,7 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
     if name_col < 0:
         name_col = 0
 
-    results: list[tuple[str, float]] = []
+    results: list[tuple[str, str, float]] = []
     for row in rows[header_idx + 1:]:
         if len(row) <= max(name_col, day_col):
             continue
@@ -152,14 +178,16 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, float]]:
         if _normalize_name(name) in _SKIP_NAMES:
             continue
         amount = _parse_amount(row[day_col] if day_col < len(row) else "")
-        if amount > 0:
-            results.append((name, amount))
+        if amount <= 0:
+            continue
+        chatter_id = _format_id(row[ID_COL_INDEX] if ID_COL_INDEX < len(row) else "")
+        results.append((name, chatter_id, amount))
 
-    results.sort(key=lambda x: x[1], reverse=True)
+    results.sort(key=lambda x: x[2], reverse=True)
     return results
 
 
-async def _get_one_sheet(sheet_id: str, sheet_gid: str, day: int, label: str) -> list[tuple[str, float]]:
+async def _get_one_sheet(sheet_id: str, sheet_gid: str, day: int, label: str) -> list[tuple[str, str, float]]:
     """Fetch + parse a single sheet. Returns [] if missing/failed."""
     if not sheet_id:
         return []
@@ -169,30 +197,30 @@ async def _get_one_sheet(sheet_id: str, sheet_gid: str, day: int, label: str) ->
     return parse_balances_for_day(csv_text, day)
 
 
-def _merge_entries(*sources: list[tuple[str, float]]) -> list[tuple[str, float]]:
+def _merge_entries(*sources: list[tuple[str, str, float]]) -> list[tuple[str, str, float]]:
     """Merge entries by normalized name, summing amounts.
 
-    Display name = the first variant seen (preserves original casing/spelling).
+    Display name = first variant seen. ID = first non-empty seen.
     """
     totals: dict[str, float] = {}
     display: dict[str, str] = {}
+    ids: dict[str, str] = {}
     for src in sources:
-        for name, amount in src:
+        for name, chatter_id, amount in src:
             key = _normalize_name(name)
             if key not in display:
                 display[key] = name
+            if (key not in ids or not ids[key]) and chatter_id:
+                ids[key] = chatter_id
             totals[key] = totals.get(key, 0.0) + amount
 
-    merged = [(display[k], totals[k]) for k in totals if totals[k] > 0]
-    merged.sort(key=lambda x: x[1], reverse=True)
+    merged = [(display[k], ids.get(k, ""), totals[k]) for k in totals if totals[k] > 0]
+    merged.sort(key=lambda x: x[2], reverse=True)
     return merged
 
 
-async def get_balances_for_day(day: int) -> Optional[list[tuple[str, float]]]:
-    """Return combined rating for the given day from all configured sheets.
-
-    Returns None only if *no* sheet is configured.
-    """
+async def get_balances_for_day(day: int) -> Optional[list[tuple[str, str, float]]]:
+    """Return combined rating for the given day from all configured sheets."""
     have_dm = bool(DEAL_MAKERS_SHEET_ID)
     have_ck = bool(CASH_KINGS_SHEET_ID)
 
@@ -207,7 +235,7 @@ async def get_balances_for_day(day: int) -> Optional[list[tuple[str, float]]]:
         tasks.append(_get_one_sheet(CASH_KINGS_SHEET_ID, CASH_KINGS_SHEET_GID, day, "Cash Kings"))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    cleaned: list[list[tuple[str, float]]] = []
+    cleaned: list[list[tuple[str, str, float]]] = []
     for r in results:
         if isinstance(r, Exception):
             logger.error("Sheet fetch raised: %s", r)
@@ -217,15 +245,14 @@ async def get_balances_for_day(day: int) -> Optional[list[tuple[str, float]]]:
     return _merge_entries(*cleaned)
 
 
-def format_rating(entries: list[tuple[str, float]], for_date: date) -> str:
+def format_rating(entries: list[tuple[str, str, float]], for_date: date) -> str:
     if not entries:
         return f"🏆 Рейтинг чатерів за {for_date.strftime('%d.%m.%Y')}\n\nЗа цей день даних нема."
 
     lines = [f"🏆 <b>Рейтинг чатерів за {for_date.strftime('%d.%m.%Y')}</b>", ""]
     medals = ["🥇", "🥈", "🥉"]
-    for i, (name, amount) in enumerate(entries, start=1):
+    for i, entry in enumerate(entries, start=1):
+        name, chatter_id, _amount = entry
         prefix = medals[i - 1] if i <= 3 else f"{i}."
-        # формат суми: 2645.81 -> "2 645.81"
-        amount_str = f"{amount:,.2f}".replace(",", " ")
-        lines.append(f"{prefix} {name} — {amount_str}")
+        lines.append(f"{prefix} {format_label(name, chatter_id)}")
     return "\n".join(lines)
