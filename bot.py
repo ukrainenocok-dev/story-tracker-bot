@@ -7,6 +7,42 @@ RATING_CHAT_ID = int(os.getenv("RATING_CHAT_ID", "0"))
 _rating_thread_raw = os.getenv("RATING_THREAD_ID", "").strip()
 RATING_THREAD_ID = int(_rating_thread_raw) if _rating_thread_raw.lstrip("-").isdigit() else None
 
+
+def _parse_rating_targets() -> list[tuple[int, int | None]]:
+    """Parse RATING_CHAT_IDS env var (comma-separated).
+
+    Each item is either '-100123' (no thread) or '-100123:45' (with thread).
+    Falls back to legacy RATING_CHAT_ID/RATING_THREAD_ID if the new var is empty.
+    """
+    raw = os.getenv("RATING_CHAT_IDS", "").strip()
+    targets: list[tuple[int, int | None]] = []
+    if raw:
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            chat_part, _, thread_part = part.partition(":")
+            try:
+                cid = int(chat_part.strip())
+            except ValueError:
+                continue
+            tid: int | None = None
+            if thread_part:
+                try:
+                    tid = int(thread_part.strip())
+                except ValueError:
+                    tid = None
+            targets.append((cid, tid))
+
+    # Backward compat: include legacy single chat if not already in list.
+    if RATING_CHAT_ID and not any(c == RATING_CHAT_ID for c, _ in targets):
+        targets.append((RATING_CHAT_ID, RATING_THREAD_ID))
+
+    return targets
+
+
+RATING_TARGETS = _parse_rating_targets()
+
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
@@ -336,20 +372,26 @@ async def _post_rating(target_chat: int, thread_id: int | None,
 
 
 async def send_daily_rating():
-    """Pulls yesterday's balances from the Google Sheet and posts a rating."""
+    """Pulls yesterday's balances from the Google Sheet and posts a rating
+    to every configured target chat (RATING_TARGETS)."""
     yesterday = (kyiv_now() - timedelta(days=1)).date()
     entries = await get_balances_for_day(yesterday.day)
     if entries is None:
         logger.error("Daily rating: sheet fetch failed")
         return
 
-    if not RATING_CHAT_ID:
-        logger.warning("RATING_CHAT_ID not set, falling back to admins DM")
+    if not RATING_TARGETS:
+        logger.warning("No RATING targets configured, falling back to admins DM")
         for admin_id in ADMIN_TELEGRAM_IDS:
             await _post_rating(admin_id, None, entries, yesterday)
         return
 
-    await _post_rating(RATING_CHAT_ID, RATING_THREAD_ID, entries, yesterday)
+    logger.info("Daily rating: posting to %s chats", len(RATING_TARGETS))
+    for chat_id, thread_id in RATING_TARGETS:
+        try:
+            await _post_rating(chat_id, thread_id, entries, yesterday)
+        except Exception as exc:
+            logger.error("Failed to post rating to %s: %s", chat_id, exc)
 
 
 @dp.message(Command("rating"))
