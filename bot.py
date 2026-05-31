@@ -156,6 +156,26 @@ _CATEGORY_LABELS = {
 }
 
 
+def _detect_from_caption(caption: str | None) -> str | None:
+    """Return 'login' or 'logout' if caption explicitly says so.
+
+    Login/logout скріни візуально однакові — розрізняти можна лише за caption.
+    Logout перевіряємо першим, бо 'logout' як підстрока містить 'log'.
+    """
+    if not caption:
+        return None
+    text = caption.lower().strip()
+    logout_markers = ("log out", "logout", "лог аут", "логаут", "вихід", "виходжу")
+    login_markers = ("log in", "login", "лог ін", "логін", "вхід", "захожу")
+    for m in logout_markers:
+        if m in text:
+            return CAT_LOGOUT
+    for m in login_markers:
+        if m in text:
+            return CAT_LOGIN
+    return None
+
+
 @dp.message(
     (F.photo | F.video | F.document),
     F.chat.type.in_({"group", "supergroup"}),
@@ -187,7 +207,14 @@ async def handle_media(message: Message):
             logger.error("Photo analysis failed: %s", exc)
 
     # Визначаємо категорію
-    if analysis and analysis.get("screenshot_type") in (CAT_LOGIN, CAT_STORY, CAT_POST, CAT_LOGOUT):
+    # 1) Підпис до фото — найвищий пріоритет (login/logout візуально однакові)
+    caption_hint = _detect_from_caption(message.caption)
+    if caption_hint:
+        category = caption_hint
+        logger.info("Classified via caption: %s (caption=%r)",
+                    category, (message.caption or "")[:80])
+    # 2) AI-класифікація
+    elif analysis and analysis.get("screenshot_type") in (CAT_LOGIN, CAT_STORY, CAT_POST, CAT_LOGOUT):
         category = analysis["screenshot_type"]
         logger.info("AI classified screenshot as: %s", category)
     else:
