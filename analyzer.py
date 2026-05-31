@@ -30,27 +30,43 @@ _API_URL = (
 )
 
 _PROMPT = (
-    "Ти аналізуєш скріншот, який чатер надіслав у робочу групу для трекінгу "
-    "зміни на OnlyFans.\n\n"
-    "КРОК 1. Класифікуй що зображено — обери ОДИН тип:\n"
-    "  - 'login': чатер увійшов в OnlyFans (видно dashboard, профіль моделі "
-    "після входу, фід після входу, або підтвердження входу)\n"
-    "  - 'story': чатер виставив сторіс (story manager, превʼю опублікованої "
-    "сторіс, або підтвердження публікації сторіс)\n"
-    "  - 'post': чатер виставив пост у стрічку (опублікований feed-пост, "
-    "або підтвердження публікації поста)\n"
-    "  - 'logout': чатер вийшов з акаунту (екран Log in після виходу, "
-    "підтвердження виходу, головна сторінка onlyfans.com без авторизації)\n"
-    "  - 'other': щось інше що не вписується в категорії вище\n\n"
-    "КРОК 2. Якщо тип story або post (тобто видно превʼю фото моделі) — "
-    "оціни вкладене фото моделі. Для login/logout/other ці три поля "
-    "повертай як null.\n\n"
-    "Поверни СТРОГО JSON без markdown-обгортки:\n"
+    "Ти класифікуєш скріншот, який чатер надіслав у робочу Telegram-групу "
+    "для трекінгу зміни на OnlyFans.\n\n"
+    "ВАЖЛИВО: ти ЗАВЖДИ повертаєш одне з 5 значень у полі screenshot_type — "
+    "БЕЗ ВИНЯТКІВ:\n\n"
+    "1. \"login\" — після успішного входу в OnlyFans:\n"
+    "   - dashboard з лівим меню (Home / Messages / Statements / Profile)\n"
+    "   - profile моделі з повним меню адміна\n"
+    "   - сторінка з повідомленнями (Inbox/Chats)\n"
+    "   - сторінка статистики\n\n"
+    "2. \"story\" — щодо сторіс:\n"
+    "   - інтерфейс публікації сторіс (\"Add to your story\")\n"
+    "   - превʼю активної сторіс (вертикальна, видно як stories у Instagram)\n"
+    "   - вкладка Stories у профілі моделі\n\n"
+    "3. \"post\" — щодо поста у стрічку:\n"
+    "   - feed-пост від акаунту моделі з текстом і фото горизонтальним/"
+    "квадратним (видно ім'я @username угорі, лайки/коменти)\n"
+    "   - інтерфейс публікації поста (\"New post\")\n"
+    "   - історія публікацій / Posts tab\n\n"
+    "4. \"logout\" — після виходу:\n"
+    "   - сторінка onlyfans.com з кнопкою Sign Up / Log In\n"
+    "   - порожня головна без авторизації\n"
+    "   - підтвердження \"You have been logged out\"\n\n"
+    "5. \"other\" — щось інше (НЕ скріншот OnlyFans, мем, селфі, фото "
+    "робочого столу тощо).\n\n"
+    "ПРАВИЛА:\n"
+    "- Якщо бачиш feed-пост від моделі з підписом і фото моделі — це \"post\"\n"
+    "- Якщо бачиш вертикальне вузьке фото з фоном/контентом без ім'я акаунту — це \"story\"\n"
+    "- Якщо НЕ впевнений між story / post — дивись на пропорції: вертикальне "
+    "9:16 = story, інше + видно ім'я @ = post\n"
+    "- Дай оцінку якості (model_visible/good_quality/is_nude_or_explicit) "
+    "ТІЛЬКИ для story і post. Для login/logout/other — null.\n\n"
+    "Поверни СТРОГО JSON без markdown:\n"
     "{\n"
     '  "screenshot_type": "login" | "story" | "post" | "logout" | "other",\n'
-    '  "model_visible": true | false | null,    // модель чітко видно\n'
-    '  "good_quality":  true | false | null,    // фото різке, нормальне світло\n'
-    '  "is_nude_or_explicit": true | false | null, // оголене / відвертий контент\n'
+    '  "model_visible": true | false | null,\n'
+    '  "good_quality":  true | false | null,\n'
+    '  "is_nude_or_explicit": true | false | null,\n'
     '  "reason": "коротко українською, до 80 символів"\n'
     "}"
 )
@@ -87,22 +103,8 @@ async def analyze_photo(
             }
         ],
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.1,
             "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "screenshot_type": {
-                        "type": "STRING",
-                        "enum": ["login", "story", "post", "logout", "other"],
-                    },
-                    "model_visible": {"type": "BOOLEAN"},
-                    "good_quality": {"type": "BOOLEAN"},
-                    "is_nude_or_explicit": {"type": "BOOLEAN"},
-                    "reason": {"type": "STRING"},
-                },
-                "required": ["screenshot_type"],
-            },
         },
         "safetySettings": _SAFETY_SETTINGS,
     }
