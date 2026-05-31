@@ -89,6 +89,20 @@ async def analyze_photo(
         "generationConfig": {
             "temperature": 0.2,
             "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "screenshot_type": {
+                        "type": "STRING",
+                        "enum": ["login", "story", "post", "logout", "other"],
+                    },
+                    "model_visible": {"type": "BOOLEAN"},
+                    "good_quality": {"type": "BOOLEAN"},
+                    "is_nude_or_explicit": {"type": "BOOLEAN"},
+                    "reason": {"type": "STRING"},
+                },
+                "required": ["screenshot_type"],
+            },
         },
         "safetySettings": _SAFETY_SETTINGS,
     }
@@ -120,9 +134,11 @@ async def analyze_photo(
                 "reason": "контент заблоковано safety-фільтром",
             }
         text = candidate["content"]["parts"][0]["text"].strip()
-        return json.loads(text)
+        parsed = json.loads(text)
+        logger.info("Gemini analysis: %s", parsed)
+        return parsed
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        logger.error("Gemini parse failed: %s | payload=%s", exc, str(data)[:300])
+        logger.error("Gemini parse failed: %s | payload=%s", exc, str(data)[:500])
         return None
 
 

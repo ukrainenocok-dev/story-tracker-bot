@@ -189,9 +189,15 @@ async def handle_media(message: Message):
     # Визначаємо категорію
     if analysis and analysis.get("screenshot_type") in (CAT_LOGIN, CAT_STORY, CAT_POST, CAT_LOGOUT):
         category = analysis["screenshot_type"]
+        logger.info("AI classified screenshot as: %s", category)
     else:
         # Якщо це не фото (video/document) або AI не зміг розпізнати — за замовч. story
         category = CAT_STORY
+        if message.photo:
+            logger.warning(
+                "AI classification missing (analysis=%s) — defaulting to story",
+                analysis,
+            )
 
     # shift_hour і shift_date залежать від категорії
     if category == CAT_POST:
