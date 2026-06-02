@@ -3,45 +3,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone, date
 
-RATING_CHAT_ID = int(os.getenv("RATING_CHAT_ID", "0"))
-_rating_thread_raw = os.getenv("RATING_THREAD_ID", "").strip()
-RATING_THREAD_ID = int(_rating_thread_raw) if _rating_thread_raw.lstrip("-").isdigit() else None
-
-
-def _parse_rating_targets() -> list[tuple[int, int | None]]:
-    """Parse RATING_CHAT_IDS env var (comma-separated).
-
-    Each item is either '-100123' (no thread) or '-100123:45' (with thread).
-    Falls back to legacy RATING_CHAT_ID/RATING_THREAD_ID if the new var is empty.
-    """
-    raw = os.getenv("RATING_CHAT_IDS", "").strip()
-    targets: list[tuple[int, int | None]] = []
-    if raw:
-        for part in raw.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            chat_part, _, thread_part = part.partition(":")
-            try:
-                cid = int(chat_part.strip())
-            except ValueError:
-                continue
-            tid: int | None = None
-            if thread_part:
-                try:
-                    tid = int(thread_part.strip())
-                except ValueError:
-                    tid = None
-            targets.append((cid, tid))
-
-    # Backward compat: include legacy single chat if not already in list.
-    if RATING_CHAT_ID and not any(c == RATING_CHAT_ID for c, _ in targets):
-        targets.append((RATING_CHAT_ID, RATING_THREAD_ID))
-
-    return targets
-
-
-RATING_TARGETS = _parse_rating_targets()
+# Рейтинг чатерів обслуговує окремий бот (rating_bot.py).
+# Тут залишаємо тільки story-tracking.
 
 # Кому надсилати DM-ескалації про пропущені скріни (login/story/post/logout)
 OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
@@ -66,9 +29,6 @@ from database import (
     CAT_LOGIN, CAT_STORY, CAT_POST, CAT_LOGOUT,
 )
 from analyzer import analyze_photo, format_feedback
-from sheets import get_balances_for_day, format_rating
-from image_renderer import render_rating_image
-from aiogram.types import BufferedInputFile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -449,86 +409,6 @@ async def cmd_story_status(message: Message):
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
-# ── Daily rating ─────────────────────────────────────────────────────────────
-
-async def _post_rating(target_chat: int, thread_id: int | None,
-                       entries: list, for_date: date):
-    """Render image + send. Falls back to text on render failure."""
-    caption = f"🏆 Рейтинг чатерів за {for_date.strftime('%d.%m.%Y')}"
-    kwargs = {"message_thread_id": thread_id} if thread_id else {}
-
-    png = render_rating_image(entries, for_date)
-    if png:
-        photo = BufferedInputFile(png, filename=f"rating_{for_date}.png")
-        try:
-            await bot.send_photo(target_chat, photo, caption=caption, **kwargs)
-            return
-        except Exception as exc:
-            logger.error("Rating photo failed for %s: %s — fallback to text", target_chat, exc)
-
-    # Fallback: текст
-    try:
-        await bot.send_message(target_chat, format_rating(entries, for_date),
-                               parse_mode="HTML", **kwargs)
-    except Exception as exc:
-        logger.error("Rating text send failed for %s: %s", target_chat, exc)
-
-
-async def send_daily_rating():
-    """Pulls yesterday's balances from the Google Sheet and posts a rating
-    to every configured target chat (RATING_TARGETS)."""
-    yesterday = (kyiv_now() - timedelta(days=1)).date()
-    entries = await get_balances_for_day(yesterday.day)
-    if entries is None:
-        logger.error("Daily rating: sheet fetch failed")
-        return
-
-    if not RATING_TARGETS:
-        logger.warning("No RATING targets configured, falling back to admins DM")
-        for admin_id in ADMIN_TELEGRAM_IDS:
-            await _post_rating(admin_id, None, entries, yesterday)
-        return
-
-    logger.info("Daily rating: posting to %s chats", len(RATING_TARGETS))
-    for chat_id, thread_id in RATING_TARGETS:
-        try:
-            await _post_rating(chat_id, thread_id, entries, yesterday)
-        except Exception as exc:
-            logger.error("Failed to post rating to %s: %s", chat_id, exc)
-
-
-@dp.message(Command("rating"))
-async def cmd_rating(message: Message):
-    if not is_admin(message):
-        return
-    # Опціонально приймаємо номер дня: /rating 18  (інакше — вчора).
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) >= 2 and parts[1].strip().isdigit():
-        day = int(parts[1].strip())
-        target_date = kyiv_now().date().replace(day=day) if 1 <= day <= 31 else (kyiv_now() - timedelta(days=1)).date()
-    else:
-        target_date = (kyiv_now() - timedelta(days=1)).date()
-
-    entries = await get_balances_for_day(target_date.day)
-    if entries is None:
-        await message.reply("Не вдалося прочитати таблицю. Перевір SALARY_SHEET_ID і доступ.")
-        return
-    await _post_rating(message.chat.id, message.message_thread_id, entries, target_date)
-
-
-@dp.message(Command("broadcast_rating"))
-async def cmd_broadcast_rating(message: Message):
-    """Admin: manually trigger the daily broadcast right now (for testing)."""
-    if not is_admin(message):
-        return
-    if not RATING_TARGETS:
-        await message.reply("RATING_CHAT_IDS не налаштовано — нікуди розсилати.")
-        return
-    await message.reply(f"Запускаю розсилку в {len(RATING_TARGETS)} чатів…")
-    await send_daily_rating()
-    await message.reply("Готово ✅")
-
-
 # ── Scheduler jobs ───────────────────────────────────────────────────────────
 
 async def send_reminder(shift_hour: int):
@@ -698,8 +578,7 @@ async def main():
     scheduler.add_job(send_reminder, "cron", hour=11, minute=30, args=[14])
     scheduler.add_job(send_reminder, "cron", hour=19, minute=30, args=[22])
 
-    # Daily rating Kyiv 18:00 = UTC 15:00
-    scheduler.add_job(send_daily_rating, "cron", hour=15, minute=0)
+    # Rating handled by separate rating_bot.py service
 
     # Reports    Kyiv 08:00 = UTC 05:00 | 16:00 = 13:00 | 00:00 = 21:00
     scheduler.add_job(send_report, "cron", hour=5,  minute=0, args=[6])
