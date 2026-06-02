@@ -19,10 +19,12 @@ Entry type: tuple[str, str, float] = (full_name, chatter_id, amount).
 """
 
 import asyncio
+import calendar
 import csv
 import io
 import logging
 import os
+import re
 from datetime import date
 from typing import Optional
 
@@ -56,6 +58,69 @@ def _csv_url(sheet_id: str, sheet_gid: str) -> Optional[str]:
         f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         f"/export?format=csv&gid={sheet_gid}"
     )
+
+
+_TAB_CACHE: dict[tuple[str, str], str] = {}  # (sheet_id, "Month YYYY") → gid
+
+
+async def _list_tabs(sheet_id: str) -> dict[str, str]:
+    """Return {tab_name: gid} for all tabs of a public Google Sheet.
+
+    Парсимо /edit-сторінку — там у JSON-bootstrap-блоці є список вкладок.
+    """
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+    timeout = aiohttp.ClientTimeout(total=SHEET_TIMEOUT)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    logger.error("List tabs HTTP %s for %s", resp.status, sheet_id)
+                    return {}
+                html = await resp.text()
+    except Exception as exc:
+        logger.error("List tabs failed for %s: %s", sheet_id, exc)
+        return {}
+
+    # У Google Sheets bootstrap HTML містить пари назв і gid у JSON.
+    # Шаблон: "name":"May 2026","sheetId":202033640  або  {sheetId:12345,...,title:"May 2026"...}
+    tabs: dict[str, str] = {}
+    # 1. Сучасний bootstrap: name + sheetId у наближених позиціях
+    for m in re.finditer(r'"name":"([^"\\]{1,60})","sheetId":(\d+)', html):
+        tabs[m.group(1)] = m.group(2)
+    # 2. Якщо нічого не знайдено — спробуємо інший шаблон (старший формат)
+    if not tabs:
+        for m in re.finditer(r'sheetId["\\]*:["\\]*(\d+)[^}]{0,200}?title["\\]*:["\\]*([^",}\\]+)', html):
+            gid, name = m.group(1), m.group(2)
+            tabs[name.strip()] = gid
+    logger.info("Sheet %s: detected %d tabs", sheet_id, len(tabs))
+    return tabs
+
+
+async def _find_month_gid(sheet_id: str, fallback_gid: str, for_date: date) -> str:
+    """Find GID of tab named '{Month} {Year}' (e.g. 'June 2026').
+
+    Кешуємо результат на час життя процесу — щоб не лазити в HTML щоразу.
+    """
+    month_name = calendar.month_name[for_date.month]  # 'May', 'June', ...
+    target = f"{month_name} {for_date.year}"
+
+    cached = _TAB_CACHE.get((sheet_id, target))
+    if cached:
+        return cached
+
+    tabs = await _list_tabs(sheet_id)
+    gid = tabs.get(target)
+    if gid:
+        logger.info("Auto-detected tab %r → gid=%s for sheet %s",
+                    target, gid, sheet_id)
+        _TAB_CACHE[(sheet_id, target)] = gid
+        return gid
+
+    logger.warning(
+        "Tab %r not found in sheet %s (have: %s) — falling back to GID %s",
+        target, sheet_id, list(tabs.keys())[:5], fallback_gid,
+    )
+    return fallback_gid
 
 
 async def _fetch_csv(sheet_id: str, sheet_gid: str, label: str = "") -> Optional[str]:
@@ -187,11 +252,21 @@ def parse_balances_for_day(csv_text: str, day: int) -> list[tuple[str, str, floa
     return results
 
 
-async def _get_one_sheet(sheet_id: str, sheet_gid: str, day: int, label: str) -> list[tuple[str, str, float]]:
-    """Fetch + parse a single sheet. Returns [] if missing/failed."""
+async def _get_one_sheet(
+    sheet_id: str, sheet_gid: str, day: int, label: str,
+    for_date: Optional[date] = None,
+) -> list[tuple[str, str, float]]:
+    """Fetch + parse a single sheet. Returns [] if missing/failed.
+
+    Якщо передано for_date — використовуємо автодетект вкладки за поточним
+    місяцем ('Month YYYY'); fallback до sheet_gid якщо не знайдено.
+    """
     if not sheet_id:
         return []
-    csv_text = await _fetch_csv(sheet_id, sheet_gid, label)
+    actual_gid = sheet_gid
+    if for_date is not None:
+        actual_gid = await _find_month_gid(sheet_id, sheet_gid, for_date)
+    csv_text = await _fetch_csv(sheet_id, actual_gid, label)
     if csv_text is None:
         return []
     return parse_balances_for_day(csv_text, day)
@@ -219,8 +294,15 @@ def _merge_entries(*sources: list[tuple[str, str, float]]) -> list[tuple[str, st
     return merged
 
 
-async def get_balances_for_day(day: int) -> Optional[list[tuple[str, str, float]]]:
-    """Return combined rating for the given day from all configured sheets."""
+async def get_balances_for_day(
+    day: int, for_date: Optional[date] = None
+) -> Optional[list[tuple[str, str, float]]]:
+    """Return combined rating for the given day from all configured sheets.
+
+    Якщо for_date передано — автоматично знаходимо вкладку 'Month YYYY' замість
+    зашитого GID. Це дозволяє автоматично читати поточний місяць без оновлення
+    конфігу.
+    """
     have_dm = bool(DEAL_MAKERS_SHEET_ID)
     have_ck = bool(CASH_KINGS_SHEET_ID)
 
@@ -230,9 +312,13 @@ async def get_balances_for_day(day: int) -> Optional[list[tuple[str, str, float]
 
     tasks = []
     if have_dm:
-        tasks.append(_get_one_sheet(DEAL_MAKERS_SHEET_ID, DEAL_MAKERS_SHEET_GID, day, "Deal Makers"))
+        tasks.append(_get_one_sheet(
+            DEAL_MAKERS_SHEET_ID, DEAL_MAKERS_SHEET_GID, day, "Deal Makers", for_date,
+        ))
     if have_ck:
-        tasks.append(_get_one_sheet(CASH_KINGS_SHEET_ID, CASH_KINGS_SHEET_GID, day, "Cash Kings"))
+        tasks.append(_get_one_sheet(
+            CASH_KINGS_SHEET_ID, CASH_KINGS_SHEET_GID, day, "Cash Kings", for_date,
+        ))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     cleaned: list[list[tuple[str, str, float]]] = []

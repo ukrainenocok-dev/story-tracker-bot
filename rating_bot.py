@@ -121,7 +121,7 @@ async def send_daily_rating():
     """Pulls yesterday's balances from the Google Sheets and posts a rating
     to every configured target chat (RATING_TARGETS)."""
     yesterday = (kyiv_now() - timedelta(days=1)).date()
-    entries = await get_balances_for_day(yesterday.day)
+    entries = await get_balances_for_day(yesterday.day, for_date=yesterday)
     if entries is None:
         logger.error("Daily rating: sheet fetch failed")
         return
@@ -157,7 +157,7 @@ async def cmd_rating(message: Message):
     else:
         target_date = (kyiv_now() - timedelta(days=1)).date()
 
-    entries = await get_balances_for_day(target_date.day)
+    entries = await get_balances_for_day(target_date.day, for_date=target_date)
     if entries is None:
         await message.reply("Не вдалося прочитати таблицю. Перевір SALARY_SHEET_ID і доступ.")
         return
