@@ -1,5 +1,5 @@
-﻿aiogram==3.13.1
-aiosqlite
+aiogram==3.13.1
+asyncpg
 APScheduler==3.10.4
 python-dotenv
 aiohttp

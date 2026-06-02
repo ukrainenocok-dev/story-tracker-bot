@@ -1,7 +1,22 @@
-import aiosqlite
-from datetime import date as date_type
+"""PostgreSQL database layer (asyncpg).
 
-DB_PATH = "story_tracker.db"
+Required env var:
+  DATABASE_URL — postgres://user:pass@host/db?sslmode=require
+
+Neon / Supabase connection strings зазвичай вже містять sslmode=require.
+Якщо у твоєму DSN немає — додай вручну.
+"""
+
+import logging
+import os
+from datetime import date as date_type
+from typing import Optional
+
+import asyncpg
+
+logger = logging.getLogger(__name__)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # Категорії скріншотів
 CAT_LOGIN = "login"
@@ -10,80 +25,106 @@ CAT_POST = "post"
 CAT_LOGOUT = "logout"
 ALL_CATEGORIES = (CAT_LOGIN, CAT_STORY, CAT_POST, CAT_LOGOUT)
 
+# Global connection pool (створюється у init_db)
+_pool: Optional[asyncpg.Pool] = None
+
+
+async def _get_pool() -> asyncpg.Pool:
+    """Lazy-init the pool. asyncpg.create_pool is the official way."""
+    global _pool
+    if _pool is None:
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL is not set")
+        _pool = await asyncpg.create_pool(
+            dsn=DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            command_timeout=15,
+        )
+        logger.info("Postgres pool created")
+    return _pool
+
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS monitored_chats (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id     INTEGER NOT NULL,
-                thread_id   INTEGER,
-                chat_name   TEXT    NOT NULL,
-                active      INTEGER NOT NULL DEFAULT 1,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                id          BIGSERIAL PRIMARY KEY,
+                chat_id     BIGINT      NOT NULL,
+                thread_id   BIGINT,
+                chat_name   TEXT        NOT NULL,
+                active      BOOLEAN     NOT NULL DEFAULT TRUE,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        # Колонка shift_hour тепер nullable (для категорії 'post')
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS story_submissions (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id      INTEGER NOT NULL,
-                thread_id    INTEGER,
-                telegram_id  INTEGER NOT NULL,
+                id           BIGSERIAL PRIMARY KEY,
+                chat_id      BIGINT      NOT NULL,
+                thread_id    BIGINT,
+                telegram_id  BIGINT      NOT NULL,
                 username     TEXT,
                 shift_hour   INTEGER,
-                shift_date   TEXT    NOT NULL,
-                category     TEXT    NOT NULL DEFAULT 'story',
-                submitted_at TEXT    NOT NULL DEFAULT (datetime('now'))
+                shift_date   DATE        NOT NULL,
+                category     TEXT        NOT NULL DEFAULT 'story',
+                submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        # Міграція для існуючих БД — додати колонку category якщо відсутня
-        async with db.execute("PRAGMA table_info(story_submissions)") as cur:
-            cols = {row[1] for row in await cur.fetchall()}
-        if "category" not in cols:
-            await db.execute(
-                "ALTER TABLE story_submissions ADD COLUMN category TEXT NOT NULL DEFAULT 'story'"
-            )
-        await db.commit()
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_submissions_lookup
+            ON story_submissions(chat_id, category, shift_date, shift_hour)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chats_active
+            ON monitored_chats(active)
+        """)
+        logger.info("Postgres schema ready")
 
 
 async def add_monitored_chat(chat_id: int, thread_id: int | None, chat_name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO monitored_chats (chat_id, thread_id, chat_name) VALUES (?, ?, ?)",
-            (chat_id, thread_id, chat_name),
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO monitored_chats (chat_id, thread_id, chat_name) VALUES ($1, $2, $3)",
+            chat_id, thread_id, chat_name,
         )
-        await db.commit()
 
 
 async def get_active_chats() -> list:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM monitored_chats WHERE active = 1 ORDER BY id"
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM monitored_chats WHERE active = TRUE ORDER BY id"
+        )
+        return [dict(r) for r in rows]
 
 
 async def deactivate_chat(record_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE monitored_chats SET active = 0 WHERE id = ?", (record_id,)
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE monitored_chats SET active = FALSE WHERE id = $1",
+            record_id,
         )
-        await db.commit()
 
 
 async def find_monitored(chat_id: int, thread_id: int | None) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT * FROM monitored_chats
-               WHERE chat_id = ? AND active = 1
-                 AND (thread_id = ? OR (thread_id IS NULL AND ? IS NULL))""",
-            (chat_id, thread_id, thread_id),
-        ) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        if thread_id is None:
+            row = await conn.fetchrow(
+                """SELECT * FROM monitored_chats
+                   WHERE chat_id = $1 AND active = TRUE AND thread_id IS NULL""",
+                chat_id,
+            )
+        else:
+            row = await conn.fetchrow(
+                """SELECT * FROM monitored_chats
+                   WHERE chat_id = $1 AND active = TRUE AND thread_id = $2""",
+                chat_id, thread_id,
+            )
+        return dict(row) if row else None
 
 
 async def add_submission(
@@ -95,14 +136,14 @@ async def add_submission(
     shift_date: date_type,
     category: str = CAT_STORY,
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
             """INSERT INTO story_submissions
                (chat_id, thread_id, telegram_id, username, shift_hour, shift_date, category)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (chat_id, thread_id, telegram_id, username, shift_hour, str(shift_date), category),
+               VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            chat_id, thread_id, telegram_id, username, shift_hour, shift_date, category,
         )
-        await db.commit()
 
 
 async def get_submissions(
@@ -121,31 +162,33 @@ async def get_submissions_by_category(
     shift_hour: int | None,
     shift_date: date_type,
 ) -> list:
-    """Return submissions of a specific category for a chat/shift/date.
-
-    For category='post' pass shift_hour=None — it ignores shift_hour and only
-    filters by date.
-    """
-    sql = """SELECT * FROM story_submissions
-             WHERE chat_id = ? AND category = ? AND shift_date = ?
-               AND (thread_id = ? OR (thread_id IS NULL AND ? IS NULL))"""
-    params: tuple = (chat_id, category, str(shift_date), thread_id, thread_id)
+    pool = await _get_pool()
+    parts = [
+        "SELECT * FROM story_submissions",
+        "WHERE chat_id = $1 AND category = $2 AND shift_date = $3",
+    ]
+    params: list = [chat_id, category, shift_date]
+    if thread_id is None:
+        parts.append("AND thread_id IS NULL")
+    else:
+        params.append(thread_id)
+        parts.append(f"AND thread_id = ${len(params)}")
     if shift_hour is not None:
-        sql += " AND shift_hour = ?"
-        params = (*params, shift_hour)
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(sql, params) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+        params.append(shift_hour)
+        parts.append(f"AND shift_hour = ${len(params)}")
+    sql = " ".join(parts)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+        return [dict(r) for r in rows]
 
 
 async def get_today_status(shift_date: date_type) -> list:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
             """SELECT * FROM story_submissions
-               WHERE shift_date = ?
+               WHERE shift_date = $1
                ORDER BY shift_hour, submitted_at""",
-            (str(shift_date),),
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+            shift_date,
+        )
+        return [dict(r) for r in rows]
