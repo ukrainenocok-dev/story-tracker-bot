@@ -161,18 +161,22 @@ async def get_submissions_by_category(
     category: str,
     shift_hour: int | None,
     shift_date: date_type,
+    any_thread: bool = False,
 ) -> list:
+    """Return submissions of a category. If any_thread=True, ignore thread_id —
+    тобто дивитись на ВСІ вітки цього chat_id."""
     pool = await _get_pool()
     parts = [
         "SELECT * FROM story_submissions",
         "WHERE chat_id = $1 AND category = $2 AND shift_date = $3",
     ]
     params: list = [chat_id, category, shift_date]
-    if thread_id is None:
-        parts.append("AND thread_id IS NULL")
-    else:
-        params.append(thread_id)
-        parts.append(f"AND thread_id = ${len(params)}")
+    if not any_thread:
+        if thread_id is None:
+            parts.append("AND thread_id IS NULL")
+        else:
+            params.append(thread_id)
+            parts.append(f"AND thread_id = ${len(params)}")
     if shift_hour is not None:
         params.append(shift_hour)
         parts.append(f"AND shift_hour = ${len(params)}")

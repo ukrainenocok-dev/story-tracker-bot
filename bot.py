@@ -411,11 +411,30 @@ async def cmd_story_status(message: Message):
 
 # ── Scheduler jobs ───────────────────────────────────────────────────────────
 
+def _dedupe_by_chat_id(chats: list[dict]) -> list[dict]:
+    """Return one entry per chat_id (the first one encountered).
+
+    Use коли треба робити перевірку 'у чаті є щось' на рівні всієї групи,
+    а не окремих гілок (бо одна група може мати кілька гілок: report, stories…).
+    """
+    seen: dict[int, dict] = {}
+    for c in chats:
+        cid = c["chat_id"]
+        if cid not in seen:
+            seen[cid] = c
+    return list(seen.values())
+
+
 async def send_reminder(shift_hour: int):
     shift_date = kyiv_now().date()
-    for chat in await get_active_chats():
+    # Дедупаємо по chat_id — якщо у будь-якій з гілок чату вже була Story,
+    # ніяких нагадувань. Нагадування шлемо у першу за створенням гілку.
+    for chat in _dedupe_by_chat_id(await get_active_chats()):
         cid, tid = chat["chat_id"], chat["thread_id"]
-        if await get_submissions(cid, tid, shift_hour, shift_date):
+        subs = await get_submissions_by_category(
+            cid, None, CAT_STORY, shift_hour, shift_date, any_thread=True,
+        )
+        if subs:
             continue
         try:
             kwargs = {"message_thread_id": tid} if tid else {}
@@ -430,10 +449,12 @@ async def send_reminder(shift_hour: int):
 
 async def send_report(shift_hour: int):
     sd = shift_date_for_report(shift_hour)
-    for chat in await get_active_chats():
+    for chat in _dedupe_by_chat_id(await get_active_chats()):
         cid, tid = chat["chat_id"], chat["thread_id"]
-        subs = await get_submissions(cid, tid, shift_hour, sd)
-
+        # Дивимось чи в БУДЬ-ЯКІЙ з гілок цього чату була Story
+        subs = await get_submissions_by_category(
+            cid, None, CAT_STORY, shift_hour, sd, any_thread=True,
+        )
         if subs:
             continue
 
@@ -477,14 +498,16 @@ _CAT_LABEL_UI = {
 
 
 async def remind_login_logout_in_group(shift_hour: int):
-    """T+10 min: nudge groups in which login/logout for this shift is missing."""
+    """T+10 min: nudge groups в яких login/logout не отримано в жодній з гілок."""
     now = kyiv_now()
     shift_date = _shift_date_for(now, shift_hour)
-    for chat in await get_active_chats():
+    for chat in _dedupe_by_chat_id(await get_active_chats()):
         cid, tid = chat["chat_id"], chat["thread_id"]
         missing = []
         for cat in (CAT_LOGIN, CAT_LOGOUT):
-            subs = await get_submissions_by_category(cid, tid, cat, shift_hour, shift_date)
+            subs = await get_submissions_by_category(
+                cid, None, cat, shift_hour, shift_date, any_thread=True,
+            )
             if not subs:
                 missing.append(_CAT_LABEL_UI[cat])
         if not missing:
@@ -502,14 +525,16 @@ async def remind_login_logout_in_group(shift_hour: int):
 
 
 async def escalate_login_logout(shift_hour: int):
-    """T+20 min: DM the owner about chats with still-missing login/logout."""
+    """T+20 min: DM owner — один алерт на групу незалежно від кількості гілок."""
     now = kyiv_now()
     shift_date = _shift_date_for(now, shift_hour)
-    for chat in await get_active_chats():
-        cid, tid = chat["chat_id"], chat["thread_id"]
+    for chat in _dedupe_by_chat_id(await get_active_chats()):
+        cid = chat["chat_id"]
         missing = []
         for cat in (CAT_LOGIN, CAT_LOGOUT):
-            subs = await get_submissions_by_category(cid, tid, cat, shift_hour, shift_date)
+            subs = await get_submissions_by_category(
+                cid, None, cat, shift_hour, shift_date, any_thread=True,
+            )
             if not subs:
                 missing.append(_CAT_LABEL_UI[cat])
         if missing:
@@ -520,11 +545,13 @@ async def escalate_login_logout(shift_hour: int):
 
 
 async def escalate_story(shift_hour: int):
-    """After end-of-shift report: DM owner about chats with no story."""
+    """Один DM на групу якщо Story не було в жодній з її гілок."""
     sd = shift_date_for_report(shift_hour)
-    for chat in await get_active_chats():
-        cid, tid = chat["chat_id"], chat["thread_id"]
-        subs = await get_submissions_by_category(cid, tid, CAT_STORY, shift_hour, sd)
+    for chat in _dedupe_by_chat_id(await get_active_chats()):
+        cid = chat["chat_id"]
+        subs = await get_submissions_by_category(
+            cid, None, CAT_STORY, shift_hour, sd, any_thread=True,
+        )
         if not subs:
             await notify_owner(
                 f"🚨 <b>[{chat['chat_name']}]</b> зміна {shift_hour:02d}:00 ({sd}) — "
@@ -533,11 +560,13 @@ async def escalate_story(shift_hour: int):
 
 
 async def check_post_deadline():
-    """Mon/Wed/Fri 23:50 Kyiv: DM owner about chats with no post today."""
+    """Mon/Wed/Fri 23:50 Kyiv: один DM на групу про відсутній Post."""
     today = kyiv_now().date()
-    for chat in await get_active_chats():
-        cid, tid = chat["chat_id"], chat["thread_id"]
-        subs = await get_submissions_by_category(cid, tid, CAT_POST, None, today)
+    for chat in _dedupe_by_chat_id(await get_active_chats()):
+        cid = chat["chat_id"]
+        subs = await get_submissions_by_category(
+            cid, None, CAT_POST, None, today, any_thread=True,
+        )
         if not subs:
             await notify_owner(
                 f"🚨 <b>[{chat['chat_name']}]</b> {today.strftime('%a %d.%m')} — "
