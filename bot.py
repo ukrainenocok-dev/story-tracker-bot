@@ -117,22 +117,38 @@ _CATEGORY_LABELS = {
 
 
 def _detect_from_caption(caption: str | None) -> str | None:
-    """Return 'login' or 'logout' if caption explicitly says so.
+    """Return category if caption explicitly hints one.
 
-    Login/logout скріни візуально однакові — розрізняти можна лише за caption.
-    Logout перевіряємо першим, бо 'logout' як підстрока містить 'log'.
+    Priority: caption override > AI classification.
+    Login/logout — підстрока (бо їх можна писати у складі ширшого тексту з балансом).
+    Post/story — перевіряємо ПЕРШЕ СЛОВО (точне), щоб уникнути хибних спрацювань
+    типу "I posted yesterday" → post.
     """
     if not caption:
         return None
     text = caption.lower().strip()
+    if not text:
+        return None
+
+    # 1) Logout перевіряємо першим (logout містить "log"), і шукаємо підстроку
     logout_markers = ("log out", "logout", "лог аут", "логаут", "вихід", "виходжу")
-    login_markers = ("log in", "login", "лог ін", "логін", "вхід", "захожу")
     for m in logout_markers:
         if m in text:
             return CAT_LOGOUT
+
+    # 2) Login — теж підстрока
+    login_markers = ("log in", "login", "лог ін", "логін", "вхід", "захожу")
     for m in login_markers:
         if m in text:
             return CAT_LOGIN
+
+    # 3) Post / Story — точне перше слово
+    first_word = text.split()[0]
+    if first_word in ("post", "пост", "посту", "пости"):
+        return CAT_POST
+    if first_word in ("story", "stories", "сторіс", "сторис", "сторі", "істория", "історія"):
+        return CAT_STORY
+
     return None
 
 
